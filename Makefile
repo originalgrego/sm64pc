@@ -24,6 +24,9 @@ TARGET_N64 = 0
 # Build and optimize for Raspberry Pi(s)
 TARGET_RPI ?= 0
 
+# Makeflag to enable dumping textures to unmatched_textures directory
+DUMP_TEXTURES ?= 0
+
 # Makeflag to enable OSX fixes
 OSX_BUILD ?= 0
 
@@ -145,6 +148,10 @@ endif
 
 ifeq ($(OSX_BUILD),1) # Modify GFX & SDL2 for OSX GL
      VERSION_CFLAGS += -DOSX_BUILD
+endif
+
+ifeq ($(DUMP_TEXTURES),1)
+     VERSION_CFLAGS += -DDUMP_TEXTURES
 endif
 
 VERSION_ASFLAGS := --defsym AVOID_UB=1
