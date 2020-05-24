@@ -433,17 +433,19 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id) {
 
 static void gfx_opengl_upload_texture(uint8_t *rgba32_buf, int width, int height, uint32_t crc) {
     uint32_t hash = (crc >> 2) & 0xffff;
-
-    if (surfaceHashMap[hash].crc == crc) {
-        printf("Found matching surface %08x\n", crc);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surfaceHashMap[hash].w, surfaceHashMap[hash].h, 0, GL_RGBA,
-                        GL_UNSIGNED_BYTE, surfaceHashMap[hash].surface);
-        return;
+    for (int x = 0; x < 32; x++) {
+		if (surfaceHashMap[hash + x].crc == crc) {
+			printf("Found matching surface %08x\n", crc);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surfaceHashMap[hash + x].w,
+                                     surfaceHashMap[hash + x].h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                     surfaceHashMap[hash + x].surface);
+			return;
+		}
     }
 
-#ifdef DUMP_TEXTURES
     printf("Non-matching surface %08x\n", crc);
 
+#ifdef DUMP_TEXTURES
     char path[2048];
 #if FOR_WINDOWS
     strcpy(path, "unmatched_textures\\");
@@ -570,12 +572,23 @@ static void gfx_opengl_init(void) {
 
 			uint32_t hash = (crc >> 2) & 0xffff;
 
-			surfaceHashMap[hash].crc = crc;
-            surfaceHashMap[hash].surface = surface;
-            surfaceHashMap[hash].w = w;
-            surfaceHashMap[hash].h = h;
+			int found = 0;
+			for (int x = 0; !found && x < 32; x++) {
+                if (surfaceHashMap[hash + x].crc == 0) {
+                    surfaceHashMap[hash + x].crc = crc;
+                    surfaceHashMap[hash + x].surface = surface;
+                    surfaceHashMap[hash + x].w = w;
+                    surfaceHashMap[hash + x].h = h;
+                    found = 1;
+                    printf("Adding crc to hash map - %08x\r\n", crc);
+				} else {
+                    printf("Crc %08x collided on hash %08x, moving\r\n", crc, hash);
+                }
+            }
 
-            printf("Adding crc to hash map - %08x\r\n", crc);
+            if (!found) {
+                printf("Couldnt find free spot for crc in hash map - %08x\r\n", crc);
+			}
 
             count++;
         }
