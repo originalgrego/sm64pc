@@ -58,17 +58,17 @@ struct ShaderProgram {
 };
 
 struct SurfaceData {
-  uint32_t crc;
-  stbi_uc *surface;
-  int w;
-  int h;
+    uint32_t crc;
+    stbi_uc *surface;
+    int w;
+    int h;
 };
 
 static struct ShaderProgram shader_program_pool[64];
 static uint8_t shader_program_pool_size;
 static GLuint opengl_vbo;
 
-static struct SurfaceData surfaces[2048];
+static struct SurfaceData surfaceHashMap[65536];
 
 static bool gfx_opengl_z_is_from_0_to_1(void) {
     return false;
@@ -434,13 +434,14 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id) {
 }
 
 static void gfx_opengl_upload_texture(uint8_t *rgba32_buf, int width, int height, uint32_t crc) {
-  for (int x = 0; x < 2048; x ++) {
-    if (surfaces[x].crc == crc) {
-      printf("Found matching surface %08x\n", crc);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surfaces[x].w,surfaces[x].h,0,GL_RGBA, GL_UNSIGNED_BYTE, surfaces[x].surface);
-      return;
+    uint32_t hash = (crc >> 2) & 0xffff;
+
+    if (surfaceHashMap[hash].crc == crc) {
+        printf("Found matching surface %08x\n", crc);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surfaceHashMap[hash].w, surfaceHashMap[hash].h, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, surfaceHashMap[hash].surface);
+        return;
     }
-  }
 
 #ifdef DUMP_TEXTURES
   printf("Non-matching surface %08x\n", crc);
@@ -539,40 +540,46 @@ static void gfx_opengl_init(void) {
     DIR *d;
     struct dirent *dir;
     d = opendir("textures_out_combined");
-    if (d)
-    {
-        while ((dir = readdir(d)) != NULL)
-        {
-			char hexString[9];
-			for (int x = 0; x < 8; x ++) {
-				hexString[x] = dir->d_name[x];
-			}
+    if (d) {
+        while ((dir = readdir(d)) != NULL) {
+            if (dir->d_name[0] == '.') {
+                continue;
+            }
+
+            char hexString[9];
+            for (int x = 0; x < 8; x++) {
+                hexString[x] = dir->d_name[x];
+            }
             hexString[8] = '\0';
-			
-	        uint32_t crc = (uint32_t) strtoul(hexString, NULL, 16);
+
+            uint32_t crc = (uint32_t) strtoul(hexString, NULL, 16);
 
             printf("Surface %d found - %s %08x %s\n", count, hexString, crc, dir->d_name);
-			
+
             char path[2048];
-        #if FOR_WINDOWS
+#if FOR_WINDOWS
             strcpy(path, "textures_out_combined\\");
-        #else
+#else
             strcpy(path, "textures_out_combined/");
-        #endif
-            strcat(path,  dir->d_name);
+#endif
+                        strcat(path, dir->d_name);
 
-			int w = 0;
-			int h = 0;
-			int channels = 0;
+            uint32_t hash = (crc >> 2) & 0xffff;
 
-			stbi_uc *surface = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
+            stbi_uc *surface = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
 
-			surfaces[count].crc = crc;
-			surfaces[count].surface = surface;
-			surfaces[count].w = w;
-			surfaces[count].h = h;
+            int w = 0;
+            int h = 0;
+            int channels = 0;
 
-			count ++;
+            surfaceHashMap[hash].crc = crc;
+            surfaceHashMap[hash].surface = surface;
+            surfaceHashMap[hash].w = w;
+            surfaceHashMap[hash].h = h;
+
+            printf("Adding crc to hash map - %08x\r\n", crc);
+
+            count ++;
         }
         closedir(d);
     }
