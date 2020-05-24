@@ -1,5 +1,18 @@
+#ifndef LEGACY_GL
+
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <dirent.h>
+#include <string.h>
+
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_NO_TGA
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -21,7 +34,13 @@
 #else
 #include <SDL2/SDL.h>
 #define GL_GLEXT_PROTOTYPES 1
+
+#ifdef OSX_BUILD
+#include <SDL2/SDL_opengl.h>
+#else
 #include <SDL2/SDL_opengles2.h>
+#endif
+
 #endif
 
 #include "gfx_cc.h"
@@ -38,9 +57,18 @@ struct ShaderProgram {
     uint8_t num_attribs;
 };
 
+struct SurfaceData {
+    uint32_t crc;
+    stbi_uc *surface;
+    int w;
+    int h;
+};
+
 static struct ShaderProgram shader_program_pool[64];
 static uint8_t shader_program_pool_size;
 static GLuint opengl_vbo;
+
+static struct SurfaceData surfaceHashMap[65536];
 
 static bool gfx_opengl_z_is_from_0_to_1(void) {
     return false;
@@ -187,7 +215,11 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shad
     size_t num_floats = 4;
     
     // Vertex shader
+#ifdef OSX_BUILD
+    append_line(vs_buf, &vs_len, "");
+#else
     append_line(vs_buf, &vs_len, "#version 100");
+#endif
     append_line(vs_buf, &vs_len, "attribute vec4 aVtxPos;");
     if (used_textures[0] || used_textures[1]) {
         append_line(vs_buf, &vs_len, "attribute vec2 aTexCoord;");
@@ -218,8 +250,13 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(uint32_t shad
     append_line(vs_buf, &vs_len, "}");
     
     // Fragment shader
+#ifdef OSX_BUILD
+    append_line(fs_buf, &fs_len, "");
+#else
     append_line(fs_buf, &fs_len, "#version 100");
     append_line(fs_buf, &fs_len, "precision mediump float;");
+#endif
+
     if (used_textures[0] || used_textures[1]) {
         append_line(fs_buf, &fs_len, "varying vec2 vTexCoord;");
     }
@@ -396,7 +433,39 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id) {
     glBindTexture(GL_TEXTURE_2D, texture_id);
 }
 
-static void gfx_opengl_upload_texture(uint8_t *rgba32_buf, int width, int height) {
+static void gfx_opengl_upload_texture(uint8_t *rgba32_buf, int width, int height, uint32_t crc) {
+    uint32_t hash = (crc >> 2) & 0xffff;
+    for (int x = 0; x < 32; x++) {
+        if (surfaceHashMap[hash + x].crc == crc) {
+            printf("Found matching surface %08x\n", crc);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, surfaceHashMap[hash + x].w,
+                                     surfaceHashMap[hash + x].h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                     surfaceHashMap[hash + x].surface);
+            return;
+        }
+    }
+
+  printf("Non-matching surface %08x\n", crc);
+
+#ifdef DUMP_TEXTURES
+    char path[2048];
+#if FOR_WINDOWS
+    strcpy(path, "unmatched_textures\\");
+#else
+    strcpy(path, "unmatched_textures/");
+#endif
+
+    char hex[9];
+    sprintf(hex, "%08x", crc);
+
+    strcat(path, hex);
+    strcat(path, ".png");
+
+    printf("Writing non-matching surface to - %s\n", path);
+
+    stbi_write_png(path, width, height, 4, rgba32_buf, width * 4);
+#endif
+
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
 }
 
@@ -464,7 +533,71 @@ static void gfx_opengl_init(void) {
 #if FOR_WINDOWS
     glewInit();
 #endif
-    
+
+#ifdef OSX_BUILD
+    glewInit();
+#endif
+
+    int count = 0;
+    DIR *d;
+    struct dirent *dir;
+    d = opendir("textures_out_combined");
+    if (d) {
+        while ((dir = readdir(d)) != NULL) {
+            if (dir->d_name[0] == '.') {
+                continue;
+            }
+
+            char hexString[9];
+            for (int x = 0; x < 8; x++) {
+                hexString[x] = dir->d_name[x];
+            }
+            hexString[8] = '\0';
+
+            uint32_t crc = (uint32_t) strtoul(hexString, NULL, 16);
+
+            printf("Surface %d found - %s %08x %s\n", count, hexString, crc, dir->d_name);
+
+            char path[2048];
+#if FOR_WINDOWS
+            strcpy(path, "textures_out_combined\\");
+#else
+            strcpy(path, "textures_out_combined/");
+#endif
+            strcat(path, dir->d_name);
+
+            int w = 0;
+            int h = 0;
+            int channels = 0;
+
+            stbi_uc *surface = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
+
+            uint32_t hash = (crc >> 2) & 0xffff;
+
+            int found = 0;
+            for (int x = 0; !found && x < 32; x++) {
+                if (surfaceHashMap[hash + x].crc == 0) {
+                    surfaceHashMap[hash + x].crc = crc;
+                    surfaceHashMap[hash + x].surface = surface;
+                    surfaceHashMap[hash + x].w = w;
+                    surfaceHashMap[hash + x].h = h;
+                    found = 1;
+                    printf("Adding crc to hash map - %08x\r\n", crc);
+                } else {
+                    printf("Crc %08x collided on hash %08x, moving\r\n", crc, hash);
+                }
+            }
+
+            printf("Adding crc to hash map - %08x\r\n", crc);
+            if (!found) {
+                printf("Couldnt find free spot for crc in hash map - %08x\r\n", crc);
+            }
+
+            count ++;
+        }
+        closedir(d);
+    }
+
     glGenBuffers(1, &opengl_vbo);
     
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
@@ -506,3 +639,5 @@ struct GfxRenderingAPI gfx_opengl_api = {
     gfx_opengl_start_frame,
     gfx_opengl_shutdown
 };
+
+#endif // !LEGACY_GL

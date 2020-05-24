@@ -16,16 +16,22 @@
 #include "game/game_init.h"
 #include "game/ingame_menu.h"
 #include "game/options_menu.h"
+#include "pc/pc_main.h"
 #include "pc/cliopts.h"
+#include "pc/cheats.h"
 #include "pc/configfile.h"
 #include "pc/controller/controller_api.h"
 
 #include <stdbool.h>
+#include "../../include/libc/stdlib.h"
 
 u8 optmenu_open = 0;
 
 static u8 optmenu_binding = 0;
 static u8 optmenu_bind_idx = 0;
+
+/* Keeps track of how many times the user has pressed L while in the options menu, so cheats can be unlocked */
+static s32 l_counter = 0;
 
 // How to add stuff:
 // strings: add them to include/text_strings.h.in
@@ -49,6 +55,8 @@ static const u8 menuStr[][32] = {
     { TEXT_OPT_VIDEO },
     { TEXT_OPT_AUDIO },
     { TEXT_EXIT_GAME },
+    { TEXT_OPT_CHEATS },
+
 };
 
 static const u8 optsCameraStr[][32] = {
@@ -68,10 +76,26 @@ static const u8 optsVideoStr[][32] = {
     { TEXT_OPT_TEXFILTER },
     { TEXT_OPT_NEAREST },
     { TEXT_OPT_LINEAR },
+    { TEXT_RESET_WINDOW },
+    { TEXT_OPT_VSYNC },
+    { TEXT_OPT_DOUBLE },
+    { TEXT_OPT_HUD },
 };
 
 static const u8 optsAudioStr[][32] = {
     { TEXT_OPT_MVOLUME },
+};
+
+static const u8 optsCheatsStr[][64] = {
+    { TEXT_OPT_CHEAT1 },
+    { TEXT_OPT_CHEAT2 },
+    { TEXT_OPT_CHEAT3 },
+    { TEXT_OPT_CHEAT4 },
+    { TEXT_OPT_CHEAT5 },
+    { TEXT_OPT_CHEAT6 },
+    { TEXT_OPT_CHEAT7 },
+    { TEXT_OPT_CHEAT8 },
+    { TEXT_OPT_CHEAT9 },
 };
 
 static const u8 bindStr[][32] = {
@@ -91,11 +115,19 @@ static const u8 bindStr[][32] = {
     { TEXT_BIND_DOWN },
     { TEXT_BIND_LEFT },
     { TEXT_BIND_RIGHT },
+    { TEXT_BIND_WALK },
+    { TEXT_BIND_SPEED },
 };
 
 static const u8 *filterChoices[] = {
     optsVideoStr[2],
     optsVideoStr[3],
+};
+
+static const u8 *vsyncChoices[] = {
+    toggleStr[0],
+    toggleStr[1],
+    optsVideoStr[6],
 };
 
 enum OptType {
@@ -161,7 +193,15 @@ struct SubMenu {
 /* button action functions */
 
 static void optmenu_act_exit(UNUSED struct Option *self, s32 arg) {
-    if (!arg) exit(0); // only exit on A press and not directions
+    if (!arg) game_exit(); // only exit on A press and not directions
+}
+
+static void optvideo_reset_window(UNUSED struct Option *self, s32 arg) {
+    if (!arg) {
+        // Restrict reset to A press and not directions
+        configWindow.reset = true;
+        configWindow.settings_changed = true;
+    }
 }
 
 /* submenu option lists */
@@ -195,15 +235,33 @@ static struct Option optsControls[] = {
     DEF_OPT_BIND( bindStr[13], configKeyStickDown ),
     DEF_OPT_BIND( bindStr[14], configKeyStickLeft ),
     DEF_OPT_BIND( bindStr[15], configKeyStickRight ),
+    DEF_OPT_BIND( bindStr[16], configKeyWalk ),
+    DEF_OPT_SCROLL( bindStr[17], &configSpeed, 0, 10, 1 ),
 };
 
 static struct Option optsVideo[] = {
-    DEF_OPT_TOGGLE( optsVideoStr[0], &configFullscreen ),
+    DEF_OPT_TOGGLE( optsVideoStr[0], &configWindow.fullscreen ),
+    DEF_OPT_CHOICE( optsVideoStr[5], &configWindow.vsync, vsyncChoices ),
     DEF_OPT_CHOICE( optsVideoStr[1], &configFiltering, filterChoices ),
+    DEF_OPT_BUTTON( optsVideoStr[4], optvideo_reset_window ),
+    DEF_OPT_TOGGLE( optsVideoStr[7], &configHUD ),
 };
 
 static struct Option optsAudio[] = {
     DEF_OPT_SCROLL( optsAudioStr[0], &configMasterVolume, 0, MAX_VOLUME, 1 ),
+};
+
+static struct Option optsCheats[] = {
+    DEF_OPT_TOGGLE( optsCheatsStr[0], &Cheats.EnableCheats ),
+    DEF_OPT_TOGGLE( optsCheatsStr[1], &Cheats.MoonJump ),
+    DEF_OPT_TOGGLE( optsCheatsStr[2], &Cheats.GodMode ),
+    DEF_OPT_TOGGLE( optsCheatsStr[3], &Cheats.InfiniteLives ),
+    DEF_OPT_TOGGLE( optsCheatsStr[4], &Cheats.SuperSpeed ),
+    DEF_OPT_TOGGLE( optsCheatsStr[5], &Cheats.Responsive ),
+    DEF_OPT_TOGGLE( optsCheatsStr[6], &Cheats.ExitAnywhere ),
+    DEF_OPT_TOGGLE( optsCheatsStr[7], &Cheats.HugeMario ),
+    DEF_OPT_TOGGLE( optsCheatsStr[8], &Cheats.TinyMario ),
+
 };
 
 /* submenu definitions */
@@ -214,6 +272,7 @@ static struct SubMenu menuCamera   = DEF_SUBMENU( menuStr[4], optsCamera );
 static struct SubMenu menuControls = DEF_SUBMENU( menuStr[5], optsControls );
 static struct SubMenu menuVideo    = DEF_SUBMENU( menuStr[6], optsVideo );
 static struct SubMenu menuAudio    = DEF_SUBMENU( menuStr[7], optsAudio );
+static struct SubMenu menuCheats   = DEF_SUBMENU( menuStr[9], optsCheats );
 
 /* main options menu definition */
 
@@ -225,6 +284,8 @@ static struct Option optsMain[] = {
     DEF_OPT_SUBMENU( menuStr[6], &menuVideo ),
     DEF_OPT_SUBMENU( menuStr[7], &menuAudio ),
     DEF_OPT_BUTTON ( menuStr[8], optmenu_act_exit ),
+    // NOTE: always keep cheats the last option here because of the half-assed way I toggle them
+    DEF_OPT_SUBMENU( menuStr[9], &menuCheats )
 };
 
 static struct SubMenu menuMain = DEF_SUBMENU( menuStr[3], optsMain );
@@ -405,7 +466,7 @@ void optmenu_draw(void) {
 //This has been separated for interesting reasons. Don't question it.
 void optmenu_draw_prompt(void) {
     gSPDisplayList(gDisplayListHead++, dl_ia_text_begin);
-    optmenu_draw_text(278, 212, menuStr[1 + optmenu_open], 0);
+    optmenu_draw_text(264, 212, menuStr[1 + optmenu_open], 0);
     gSPDisplayList(gDisplayListHead++, dl_ia_text_end);
 }
 
@@ -414,8 +475,22 @@ void optmenu_toggle(void) {
         #ifndef nosound
         play_sound(SOUND_MENU_CHANGE_SELECT, gDefaultSoundArgs);
         #endif
+
+        // HACK: hide the last option in main if cheats are disabled
+        menuMain.numOpts = sizeof(optsMain) / sizeof(optsMain[0]);
+        if (!Cheats.EnableCheats) {
+            menuMain.numOpts--;
+            if (menuMain.select >= menuMain.numOpts) {
+                menuMain.select = 0; // don't bother
+                menuMain.scroll = 0;
+            }
+        }
+
         currentMenu = &menuMain;
         optmenu_open = 1;
+        
+        /* Resets l_counter to 0 every time the options menu is open */
+        l_counter = 0;
     } else {
         #ifndef nosound
         play_sound(SOUND_MENU_MARIO_CASTLE_WARP2, gDefaultSoundArgs);
@@ -445,7 +520,19 @@ void optmenu_check_buttons(void) {
 
     if (gPlayer1Controller->buttonPressed & R_TRIG)
         optmenu_toggle();
-
+    
+    /* Enables cheats if the user press the L trigger 3 times while in the options menu. Also plays a sound. */
+    
+    if ((gPlayer1Controller->buttonPressed & L_TRIG) && !Cheats.EnableCheats) {
+        if (l_counter == 2) {
+                Cheats.EnableCheats = true;
+                play_sound(SOUND_MENU_STAR_SOUND, gDefaultSoundArgs);
+                l_counter = 0;
+        } else {
+            l_counter++;
+        }
+    }
+    
     if (!optmenu_open) return;
 
     u8 allowInput = 0;

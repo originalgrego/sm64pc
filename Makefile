@@ -18,13 +18,22 @@ GRUCODE ?= f3d_old
 COMPARE ?= 1
 # If NON_MATCHING is 1, define the NON_MATCHING and AVOID_UB macros when building (recommended)
 NON_MATCHING ?= 1
-# Sane default until N64 build scripts rm'd
-TARGET_N64 = 0
 
 # Build and optimize for Raspberry Pi(s)
 TARGET_RPI ?= 0
-# Compiler to use (ido or gcc)
-# COMPILER ?= ido // Old Default
+
+# Makeflag to enable dumping textures to unmatched_textures directory
+DUMP_TEXTURES ?= 0
+
+# Build for Emscripten/WebGL
+TARGET_WEB ?= 0
+
+# Makeflag to enable OSX fixes
+OSX_BUILD ?= 0
+
+# Specify the target you are building for, TARGET_BITS=0 means native
+TARGET_ARCH ?= native
+TARGET_BITS ?= 0
 
 # Disable better camera by default
 BETTERCAMERA ?= 0
@@ -34,29 +43,48 @@ NODRAWINGDISTANCE ?= 0
 TEXTURE_FIX ?= 0
 # Enable extended options menu by default
 EXT_OPTIONS_MENU ?= 1
+# Disable text-based save-files by default
+TEXTSAVES ?= 0
 
-# Build for Emscripten/WebGL
-TARGET_WEB ?= 0
-# Specify the target you are building for, 0 means native
-TARGET_ARCH ?= native
-TARGET_BITS ?= 0
+# Various workarounds for weird toolchains
 
-ifneq ($(TARGET_BITS),0)
-  BITS := -m$(TARGET_BITS)
-else
-  BITS :=
-endif
+NO_BZERO_BCOPY ?= 0
+NO_LDIV ?= 0
+
+# Use OpenGL 1.3 renderer
+
+LEGACY_GL ?= 0
 
 # Automatic settings for PC port(s)
 
 NON_MATCHING := 1
 GRUCODE := f3dex2e
-WINDOWS_BUILD := 0
+WINDOWS_BUILD ?= 0
 
 ifeq ($(TARGET_WEB),0)
 ifeq ($(OS),Windows_NT)
 WINDOWS_BUILD := 1
 endif
+endif
+
+# MXE overrides
+
+ifeq ($(WINDOWS_BUILD),1)
+  ifeq ($(CROSS),i686-w64-mingw32.static-)
+    TARGET_ARCH = i386pe
+    TARGET_BITS = 32
+    NO_BZERO_BCOPY := 1
+  else ifeq ($(CROSS),x86_64-w64-mingw32.static-)
+    TARGET_ARCH = i386pe
+    TARGET_BITS = 64
+    NO_BZERO_BCOPY := 1
+  endif
+endif
+
+ifneq ($(TARGET_BITS),0)
+  BITS := -m$(TARGET_BITS)
+else
+  BITS :=
 endif
 
 # Release (version) flag defs
@@ -96,6 +124,15 @@ else
 endif
 endif
 endif
+endif
+
+# Stuff for showing the git hash in the intro on nightly builds
+# From https://stackoverflow.com/questions/44038428/include-git-commit-hash-and-or-branch-name-in-c-c-source
+ifeq ($(shell git rev-parse --abbrev-ref HEAD),nightly)
+  $(info Hello Caldera!!! I'm here all week!)
+  GIT_HASH=`git rev-parse --short HEAD`
+  COMPILE_TIME=`date -u +'%Y-%m-%d %H:%M:%S UTC'`
+  VERSION_CFLAGS += -DNIGHTLY -DGIT_HASH="\"$(GIT_HASH)\"" -DCOMPILE_TIME="\"$(COMPILE_TIME)\""
 endif
 
 # Microcode
@@ -142,6 +179,14 @@ ifeq ($(TARGET_RPI),1) # Define RPi to change SDL2 title & GLES2 hints
       VERSION_CFLAGS += -DUSE_GLES
 endif
 
+ifeq ($(OSX_BUILD),1) # Modify GFX & SDL2 for OSX GL
+     VERSION_CFLAGS += -DOSX_BUILD
+endif
+
+ifeq ($(DUMP_TEXTURES),1)
+     VERSION_CFLAGS += -DDUMP_TEXTURES
+endif
+
 VERSION_ASFLAGS := --defsym AVOID_UB=1
 COMPARE := 0
 
@@ -168,7 +213,7 @@ endif
 endif
 
 # Make tools if out of date
-DUMMY != make -s -C tools >&2 || echo FAIL
+DUMMY != make -C tools >&2 || echo FAIL
 ifeq ($(DUMMY),FAIL)
   $(error Failed to build tools)
 endif
@@ -409,7 +454,11 @@ ENDIAN_BITWIDTH := $(BUILD_DIR)/endian-and-bitwidth
 
 # Huge deleted N64 section was here
 
-AS := as
+AS := $(CROSS)as
+
+ifeq ($(OSX_BUILD),1)
+AS := i686-w64-mingw32-as
+endif
 
 ifneq ($(TARGET_WEB),1) # As in, not-web PC port
   CC := $(CROSS)gcc
@@ -418,20 +467,32 @@ else
   CC := emcc
 endif
 
+LD := $(CC)
+
 ifeq ($(WINDOWS_BUILD),1)
-  LD := $(CXX)
-else
-  LD := $(CC)
+  ifeq ($(CROSS),i686-w64-mingw32.static-) # fixes compilation in MXE on Linux and WSL
+    LD := $(CC)
+  else ifeq ($(CROSS),x86_64-w64-mingw32.static-)
+    LD := $(CC)
+  else
+    LD := $(CXX)
+  endif
 endif
 
 ifeq ($(WINDOWS_BUILD),1) # fixes compilation in MXE on Linux and WSL
   CPP := cpp -P
   OBJCOPY := objcopy
-else
+  OBJDUMP := $(CROSS)objdump
+else ifeq ($(OSX_BUILD),1)
+  CPP := cpp-9 -P
+  OBJDUMP := i686-w64-mingw32-objdump
+  OBJCOPY := i686-w64-mingw32-objcopy
+else # Linux & other builds
   CPP := $(CROSS)cpp -P
   OBJCOPY := $(CROSS)objcopy
+  OBJDUMP := $(CROSS)objdump
 endif
-OBJDUMP := $(CROSS)objdump
+
 PYTHON := python3
 SDLCONFIG := $(CROSS)sdl2-config
 
@@ -458,6 +519,11 @@ ifeq ($(BETTERCAMERA),1)
   EXT_OPTIONS_MENU := 1
 endif
 
+ifeq ($(TEXTSAVES),1)
+  CC_CHECK += -DTEXTSAVES
+  CFLAGS += -DTEXTSAVES
+endif
+
 # Check for no drawing distance option
 ifeq ($(NODRAWINGDISTANCE),1)
   CC_CHECK += -DNODRAWINGDISTANCE
@@ -476,16 +542,32 @@ ifeq ($(EXT_OPTIONS_MENU),1)
   CFLAGS += -DEXT_OPTIONS_MENU
 endif
 
+# Check for no bzero/bcopy workaround option
+ifeq ($(NO_BZERO_BCOPY),1)
+  CC_CHECK += -DNO_BZERO_BCOPY
+  CFLAGS += -DNO_BZERO_BCOPY
+endif
+
+# Use internal ldiv()/lldiv()
+ifeq ($(NO_LDIV),1)
+  CC_CHECK += -DNO_LDIV
+  CFLAGS += -DNO_LDIV
+endif
+
+# Use OpenGL 1.3
+ifeq ($(LEGACY_GL),1)
+  CC_CHECK += -DLEGACY_GL
+  CFLAGS += -DLEGACY_GL
+endif
+
 ASFLAGS := -I include -I $(BUILD_DIR) $(VERSION_ASFLAGS)
 
 ifeq ($(TARGET_WEB),1)
 LDFLAGS := -lm -lGL -lSDL2 -no-pie -s TOTAL_MEMORY=20MB -g4 --source-map-base http://localhost:8080/ -s "EXTRA_EXPORTED_RUNTIME_METHODS=['callMain']"
 else ifeq ($(WINDOWS_BUILD),1)
   LDFLAGS := $(BITS) -march=$(TARGET_ARCH) -Llib -lpthread -lglew32 `$(SDLCONFIG) --static-libs` -lm -lglu32 -lsetupapi -ldinput8 -luser32 -lgdi32 -limm32 -lole32 -loleaut32 -lshell32 -lwinmm -lversion -luuid -lopengl32 -static
-  ifneq ($(CROSS),i686-w64-mingw32.static-)
-    ifneq ($(CROSS),x86_64-w64-mingw32.static-)
-      LDFLAGS += -no-pie
-    endif
+  ifeq ($(CROSS),)
+    LDFLAGS += -no-pie
   endif
   ifeq ($(WINDOWS_CONSOLE),1)
     LDFLAGS += -mconsole
@@ -494,9 +576,12 @@ else ifeq ($(TARGET_RPI),1)
 # Linux / Other builds below
 LDFLAGS := $(OPT_FLAGS) -lm -lGLESv2 `$(SDLCONFIG) --libs` -no-pie
 else
+ifeq ($(OSX_BUILD),1)
+LDFLAGS := -lm -framework OpenGL `$(SDLCONFIG) --libs` -no-pie -lpthread `pkg-config --libs libusb-1.0 glfw3 glew`
+else
 LDFLAGS := $(BITS) -march=$(TARGET_ARCH) -lm -lGL `$(SDLCONFIG) --libs` -no-pie -lpthread
 endif
-
+endif # End of LDFLAGS
 
 # Prevent a crash with -sopt
 export LANG := C
@@ -561,6 +646,9 @@ $(BUILD_DIR)/include/text_strings.h: include/text_strings.h.in
 $(BUILD_DIR)/include/text_menu_strings.h: include/text_menu_strings.h.in
 	$(TEXTCONV) charmap_menu.txt $< $@
 
+$(BUILD_DIR)/include/text_options_strings.h: include/text_options_strings.h.in
+	$(TEXTCONV) charmap.txt $< $@
+
 ifeq ($(VERSION),eu)
 TEXT_DIRS := text/de text/us text/fr
 
@@ -600,6 +688,7 @@ ALL_DIRS := $(BUILD_DIR) $(addprefix $(BUILD_DIR)/,$(SRC_DIRS) $(ASM_DIRS) $(GOD
 DUMMY != mkdir -p $(ALL_DIRS)
 
 $(BUILD_DIR)/include/text_strings.h: $(BUILD_DIR)/include/text_menu_strings.h
+$(BUILD_DIR)/include/text_strings.h: $(BUILD_DIR)/include/text_options_strings.h
 
 ifeq ($(VERSION),eu)
 $(BUILD_DIR)/src/menu/file_select.o: $(BUILD_DIR)/include/text_strings.h $(BUILD_DIR)/bin/eu/translation_en.o $(BUILD_DIR)/bin/eu/translation_de.o $(BUILD_DIR)/bin/eu/translation_fr.o
@@ -748,7 +837,6 @@ $(BUILD_DIR)/src/audio/%.acpp: src/audio/%.c
 $(BUILD_DIR)/src/audio/%.copt: $(BUILD_DIR)/src/audio/%.acpp
 	$(QEMU_IRIX) -silent -L $(IRIX_ROOT) $(IRIX_ROOT)/usr/lib/copt -signed -I=$< -CMP=$@ -cp=i -scalaroptimize=1
 endif
-
 
 # Rebuild files with 'GLOBAL_ASM' if the NON_MATCHING flag changes.
 $(GLOBAL_ASM_O_FILES): $(GLOBAL_ASM_DEP).$(NON_MATCHING)
