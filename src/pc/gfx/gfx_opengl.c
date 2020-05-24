@@ -562,15 +562,15 @@ static void gfx_opengl_init(void) {
 #else
             strcpy(path, "textures_out_combined/");
 #endif
-                        strcat(path, dir->d_name);
-
-            uint32_t hash = (crc >> 2) & 0xffff;
-
-            stbi_uc *surface = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
+            strcat(path, dir->d_name);
 
             int w = 0;
             int h = 0;
             int channels = 0;
+			
+            stbi_uc *surface = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
+
+            uint32_t hash = (crc >> 2) & 0xffff;
 
             surfaceHashMap[hash].crc = crc;
             surfaceHashMap[hash].surface = surface;
